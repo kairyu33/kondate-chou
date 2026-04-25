@@ -71,6 +71,104 @@ const state = {
   catalogFilter: { search: '', rarity: '' },
 };
 
+// ===== 投票の不正対策（多層防御） =====
+// 1) localStorage（既存・最軽量）
+// 2) IndexedDB （localStorage クリアされても残る）
+// 3) ブラウザ・フィンガープリント（端末特定キー、cookie/Storageを跨いで一意性）
+// 4) 任意で API 経由のサーバ集計（state.data.vote_api_url が設定されていれば送信）
+const VOTE_DB_NAME = 'kondate_votes';
+const VOTE_STORE = 'votes';
+let _fpCache = null;
+
+async function getFingerprint() {
+  if (_fpCache) return _fpCache;
+  // canvas + screen + navigator から疑似ユニーク値を作る
+  // 同一ブラウザ・同一端末ではほぼ安定、incognito でも UA/screen は維持される
+  const parts = [
+    navigator.userAgent || '',
+    navigator.language || '',
+    (navigator.languages || []).join(','),
+    `${screen.width}x${screen.height}x${screen.colorDepth}`,
+    new Date().getTimezoneOffset(),
+    navigator.hardwareConcurrency || '',
+    navigator.platform || '',
+  ];
+  try {
+    const c = document.createElement('canvas');
+    c.width = 200; c.height = 60;
+    const g = c.getContext('2d');
+    g.textBaseline = 'top';
+    g.font = '14px "Shippori Mincho", serif';
+    g.fillStyle = '#B23A2E';
+    g.fillRect(0, 0, 200, 30);
+    g.fillStyle = '#1C1613';
+    g.fillText('献立帖・成功のレシピ ◇♕✱', 2, 8);
+    parts.push(c.toDataURL().slice(-80));
+  } catch {}
+  // SHA-256
+  try {
+    const buf = new TextEncoder().encode(parts.join('|'));
+    const hash = await crypto.subtle.digest('SHA-256', buf);
+    _fpCache = Array.from(new Uint8Array(hash)).slice(0, 12)
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+  } catch {
+    // crypto.subtle が無い古い環境向けフォールバック
+    let h = 0;
+    for (const ch of parts.join('|')) h = ((h << 5) - h + ch.charCodeAt(0)) | 0;
+    _fpCache = 'fp' + Math.abs(h).toString(16);
+  }
+  return _fpCache;
+}
+
+function openVoteDB() {
+  return new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) return reject(new Error('IndexedDB unavailable'));
+    const req = indexedDB.open(VOTE_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(VOTE_STORE)) {
+        db.createObjectStore(VOTE_STORE, { keyPath: 'key' });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function readVoteIDB(key) {
+  try {
+    const db = await openVoteDB();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(VOTE_STORE, 'readonly');
+      const r = tx.objectStore(VOTE_STORE).get(key);
+      r.onsuccess = () => resolve(r.result || null);
+      r.onerror = () => reject(r.error);
+    });
+  } catch { return null; }
+}
+
+async function writeVoteIDB(record) {
+  try {
+    const db = await openVoteDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(VOTE_STORE, 'readwrite');
+      tx.objectStore(VOTE_STORE).put(record);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {}
+}
+
+// 「この choice に投票済みか？」を3経路で確認
+async function hasVoted(choiceId) {
+  const saved = loadState();
+  if (saved[`vote_${choiceId}`]) return saved[`vote_${choiceId}`];
+  const fp = await getFingerprint();
+  const key = `${choiceId}:${fp}`;
+  const rec = await readVoteIDB(key);
+  return rec ? rec.option : null;
+}
+
 async function init() {
   try {
     const res = await fetch('data.json?t=' + Date.now());
@@ -246,7 +344,7 @@ function renderRelated(base) {
 }
 
 // ===== 投票 =====
-function initVote() {
+async function initVote() {
   const area = document.getElementById('voteArea');
   const tc = state.data.today_choice;
 
@@ -255,8 +353,7 @@ function initVote() {
     return;
   }
 
-  const saved = loadState();
-  const userVote = saved[`vote_${tc.id}`];
+  const userVote = await hasVoted(tc.id);
   renderVote(tc, userVote);
 }
 
@@ -306,13 +403,48 @@ function formatDateJa(iso) {
   return `${d.getFullYear()}年 ${d.getMonth() + 1}月 ${d.getDate()}日`;
 }
 
-function castVote(choiceId, option, tc) {
+async function castVote(choiceId, option, tc) {
+  // 二重投票チェック（フィンガープリント＋IndexedDB）
+  const already = await hasVoted(choiceId);
+  if (already) {
+    renderVote(tc, already);
+    showToast('— 既にご投票頂いております —');
+    return;
+  }
+
+  // 即時UI反映（楽観的）
   const saved = loadState();
   saved[`vote_${choiceId}`] = option;
   saveState(saved);
+
+  const fp = await getFingerprint();
+  await writeVoteIDB({
+    key: `${choiceId}:${fp}`,
+    choice_id: choiceId,
+    option,
+    fingerprint: fp,
+    voted_at: new Date().toISOString(),
+  });
+
   tc['votes_' + option] = (tc['votes_' + option] || 0) + 1;
   renderVote(tc, option);
   showToast('— 一票、頂戴いたしました —');
+
+  // サーバ集計APIが構成されていれば送信（将来 vote-api/ をデプロイした時用）
+  const apiUrl = state.data.vote_api_url;
+  if (apiUrl) {
+    try {
+      await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ choice_id: choiceId, option, fingerprint: fp }),
+        keepalive: true,
+      });
+    } catch (e) {
+      // ネットワーク失敗は致命傷ではない（クライアント側集計は出来ている）
+      console.warn('vote API failed', e);
+    }
+  }
 }
 
 // ===== カタログ =====

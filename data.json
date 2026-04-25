@@ -1,11 +1,12 @@
 {
-  "generated_at": "2026-04-25T08:19:09.133Z",
+  "generated_at": "2026-04-25T12:40:34.992Z",
   "creator": {
     "name": "成功のレシピ",
     "note_url": "https://note.com/happy_recipes",
     "x_handle": "@happy_recipes",
     "membership_url": "https://note.com/happy_recipes/membership"
   },
+  "vote_api_url": null,
   "articles": [
     {
       "id": 1,
@@ -8639,6 +8640,26 @@
       "tags": "#自己啓発・心理 / @全世代 / スキルアップ, 生産性向上"
     }
   ],
-  "today_choice": null,
-  "recent_choices": []
+  "today_choice": {
+    "id": 1,
+    "date": "2026-04-25",
+    "option_a": "A案",
+    "option_b": "B案",
+    "option_c": "C案",
+    "votes_a": 0,
+    "votes_b": 0,
+    "votes_c": 0
+  },
+  "recent_choices": [
+    {
+      "id": 1,
+      "date": "2026-04-25",
+      "option_a": "A案",
+      "option_b": "B案",
+      "option_c": "C案",
+      "votes_a": 0,
+      "votes_b": 0,
+      "votes_c": 0
+    }
+  ]
 }

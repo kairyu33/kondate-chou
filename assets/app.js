@@ -2,7 +2,58 @@
 // GitHub Pagesで完全にクライアントサイド動作（data.jsonを読み込み）
 
 const STORAGE_KEY = 'kondate_state';
+const AB_KEY = 'kondate_ab';
 const RARITY_KANJI = { SSR: '極', SR: '特', R: '上', N: '並' };
+
+// シェア文面の A/B variant
+//   v1: 落ち着いた料亭調（控えめ）
+//   v2: 興奮を伝える即時投稿調（カジュアル）
+// UTMの utm_content にバリアント名が入るので、note-article-manager / 解析側でCV比較可能
+const SHARE_VARIANTS = {
+  SSR: {
+    v1: (title, handle) =>
+      `${handle ? handle + ' さん\n' : ''}✨【極】を引き当てました…\n\n「${title}」\n\n千の記事から今日の一献を授かる、献立帖にて。`,
+    v2: (title, handle) =>
+      `${handle ? handle + ' さん、' : ''}見てください…！\n🏮【極】出ました…！\n\n「${title}」\n\n— 献立帖・成功のレシピ`,
+  },
+  SR: {
+    v1: (title) => `🍶【特】の献立を頂きました\n\n「${title}」\n\n— 献立帖・成功のレシピ`,
+    v2: (title) => `今日の一献は【特】でした✨\n\n「${title}」\n\n献立帖にて`,
+  },
+  R: {
+    v1: (title) => `🌿【上】の献立を頂きました\n\n「${title}」\n\n— 献立帖・成功のレシピ`,
+    v2: (title) => `今日の献立は【上】\n\n「${title}」\n\n— 献立帖にて`,
+  },
+  N: {
+    v1: (title) => `🍙【並】の献立を頂きました\n\n「${title}」\n\n— 献立帖・成功のレシピ`,
+    v2: (title) => `今日の一献は【並】\n\n「${title}」\n\n— 献立帖にて`,
+  },
+};
+
+// 同一ユーザに同じバリアントを出し続け、誘引差をフェアに比較する
+function getShareVariant() {
+  try {
+    let v = localStorage.getItem(AB_KEY);
+    if (v !== 'v1' && v !== 'v2') {
+      v = Math.random() < 0.5 ? 'v1' : 'v2';
+      localStorage.setItem(AB_KEY, v);
+    }
+    return v;
+  } catch {
+    return Math.random() < 0.5 ? 'v1' : 'v2';
+  }
+}
+
+// 流入元計測のためのUTM付きURLを生成
+function buildShareUrl(rarity, variant) {
+  const base = location.href.split('?')[0].split('#')[0]; // テストパラメータを除去
+  const u = new URL(base);
+  u.searchParams.set('utm_source', 'twitter');
+  u.searchParams.set('utm_medium', 'ikkon_share');
+  u.searchParams.set('utm_campaign', rarity.toLowerCase()); // ssr/sr/r/n
+  u.searchParams.set('utm_content', variant);               // v1/v2
+  return u.toString();
+}
 
 // テスト用URLパラメータ:
 //   ?force=SSR|SR|R|N  …次のガチャを必ずそのレアリティにする
@@ -149,18 +200,12 @@ function showResult(result, animate) {
   ssrBonus.style.display = rarity === 'SSR' ? '' : 'none';
 
   document.getElementById('shareBtn').onclick = () => {
-    const kanji = RARITY_KANJI[rarity];
     const handle = (state.data.creator?.x_handle || '').trim();
-    let text;
-    if (rarity === 'SSR') {
-      // 殿堂入り：店主にお声掛けする動線つきの文面
-      text = handle
-        ? `${handle} さん\n【極】を引き当てました…！\n\n「${article.title}」\n\n— 献立帖・成功のレシピ`
-        : `【極】を引き当てました…！\n\n「${article.title}」\n\n— 献立帖・成功のレシピ`;
-    } else {
-      text = `【${kanji}】の献立を頂きました\n「${article.title}」\n— 献立帖・成功のレシピ`;
-    }
-    const url = location.href.split('?')[0].split('#')[0]; // テストパラメータを除去
+    const variant = getShareVariant();
+    const builder = (SHARE_VARIANTS[rarity] || SHARE_VARIANTS.N)[variant]
+                  || SHARE_VARIANTS[rarity].v1;
+    const text = builder(article.title, handle);
+    const url = buildShareUrl(rarity, variant);
     window.open(
       `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}&hashtags=献立帖,成功のレシピ`,
       '_blank'
